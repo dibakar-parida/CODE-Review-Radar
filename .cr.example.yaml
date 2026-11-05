@@ -1,0 +1,37 @@
+# .cr.yaml — Local-First AI Code Review Configuration
+version: 1
+
+# AI Execution Mode: 'local' (default), 'hybrid', or 'cloud'
+mode: local
+
+# Local LLM Configuration (Ollama)
+local:
+  endpoint: "http://127.0.0.1:11434"
+  model: "qwen2.5-coder:7b"
+  timeoutMs: 60000
+  contextWindowTokens: 8192
+
+# Target Review Defaults
+target:
+  defaultType: staged
+
+# Review Rules & Thresholds
+review:
+  minConfidence: 0.70
+  maxFindingsPerFile: 10
+  categories:
+    - bug
+    - security
+    - performance
+    - architecture
+    - quality
+    - testing
+  ignorePaths:
+    - "node_modules/**"
+    - "dist/**"
+    - "**/*.lock"
+    - "**/*.min.*"
+
+# Output Formatting: 'terminal', 'json', 'markdown', or 'html'
+reporter:
+  defaultFormat: terminal

@@ -1,0 +1,165 @@
+:root {
+  --vb-lime: #39FF14;
+  --vb-purple: #BF00FF;
+  --vb-pink: #FF1493;
+  --vb-cyan: #00FFFF;
+  --vb-amber: #FFAA00;
+  --vb-orange: #FF7F00;
+  --vb-rose: #FF006E;
+  --vb-chartreuse: #CCFF00;
+  --vb-bg: #0D0D0D;
+}
+
+html {
+  /* Proximity, not mandatory: short or uneven sections never trap scrolling */
+  scroll-snap-type: y proximity;
+  box-sizing: border-box;
+}
+
+*, *:before, *:after {
+  box-sizing: inherit;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--vb-bg);
+  color: #FFFFFF;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  overflow-x: hidden;
+}
+
+section {
+  scroll-snap-align: start;
+  margin-bottom: 48px;
+}
+
+h1 {
+  font-size: clamp(3rem, 8vw, 6rem);
+  font-weight: 900;
+  line-height: 1.05;
+  letter-spacing: -0.04em;
+  margin: 0;
+}
+
+h2 {
+  font-size: clamp(2rem, 5vw, 3.5rem);
+  font-weight: 900;
+  letter-spacing: -0.03em;
+  margin: 0 0 1rem 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 3rem;
+}
+
+.block {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  aspect-ratio: 1;
+  padding: 1.5rem;
+  border-radius: 1.5rem;
+  background: var(--vb-lime);
+  color: #000000;
+  font-weight: 900;
+  transition: transform 150ms ease;
+  position: relative;
+  overflow: hidden;
+  text-decoration: none;
+}
+
+.block:hover {
+  transform: scale(1.05);
+}
+
+.block:nth-child(4n + 2) {
+  background: var(--vb-purple);
+  color: #FFFFFF;
+}
+
+.block:nth-child(4n + 3) {
+  background: var(--vb-pink);
+  color: #000000;
+}
+
+.block:nth-child(4n + 4) {
+  background: var(--vb-cyan);
+  color: #000000;
+}
+
+.button {
+  padding: 1.25rem 2.5rem;
+  border: 0;
+  border-radius: 1rem;
+  background: linear-gradient(90deg, var(--vb-pink), var(--vb-purple));
+  color: #000000;
+  font-size: 1.25rem;
+  font-weight: 700;
+  transition: transform 150ms ease;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.button:hover {
+  transform: scale(1.05);
+}
+
+.button:focus-visible {
+  outline: 3px solid var(--vb-lime);
+  outline-offset: 4px;
+}
+
+/* Decorative geometric shapes; keep them clear of headings and CTAs */
+.shape {
+  position: absolute;
+  pointer-events: none;
+  animation: vb-spin 18s linear infinite;
+  opacity: 0.25;
+}
+
+@keyframes vb-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-snap-type: none; }
+  .shape { animation: none; }
+  .block, .button { transition: none; }
+  .block:hover, .button:hover { transform: none; }
+}
+
+/* Monospace code wells and cards */
+.code-well {
+  background: #080808;
+  border: 1px solid #222222;
+  border-radius: 1rem;
+  padding: 1.25rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9rem;
+  overflow-x: auto;
+}
+
+.finding-card {
+  background: #141414;
+  border: 2px solid #262626;
+  border-left: 6px solid var(--vb-pink);
+  border-radius: 1.5rem;
+  padding: 2rem;
+  margin-bottom: 2rem;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+
+.badge {
+  padding: 0.25rem 0.6rem;
+  border-radius: 0.4rem;
+  font-size: 0.75rem;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-family: monospace;
+}

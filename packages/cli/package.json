@@ -1,0 +1,33 @@
+{
+  "name": "@cr/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "cr": "./dist/bin/cr.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "start": "node ./dist/bin/cr.js",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@cr/core": "workspace:*",
+    "@cr/server": "workspace:*",
+    "@cr/shared": "workspace:*",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

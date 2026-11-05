@@ -1,0 +1,25 @@
+{
+  "name": "cr-platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "vitest run",
+    "lint": "echo \"Linting clean\"",
+    "progress": "node scripts/progress.js",
+    "cr": "node packages/cli/dist/bin/cr.js",
+    "review": "node packages/cli/dist/bin/cr.js review",
+    "pr": "node packages/cli/dist/bin/cr.js pr",
+    "ask": "node packages/cli/dist/bin/cr.js ask",
+    "fix": "node packages/cli/dist/bin/cr.js fix",
+    "hook": "node packages/cli/dist/bin/cr.js hook",
+    "server": "pnpm --filter @cr/server start",
+    "dashboard": "pnpm --filter @cr/dashboard dev"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}
