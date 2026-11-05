@@ -143,4 +143,184 @@ describe('LocalReviewServer (@cr/server) on 127.0.0.1', () => {
     expect(data.stats.performance.ignored).toBe(1);
     expect(data.stats.performance.acceptanceRate).toBe(0.0);
   });
+
+  it('rejects requests with malicious Host headers to prevent DNS Rebinding', async () => {
+    // Note: WHATWG fetch silently strips custom 'Host' headers, so we use http.get
+    const statusCode = await new Promise<number>((resolve) => {
+      const req = http.get(
+        {
+          hostname: '127.0.0.1',
+          port: testPort,
+          path: '/api/health',
+          headers: {
+            Host: 'attacker.evil-domain.com',
+          },
+        },
+        (res) => {
+          resolve(res.statusCode ?? 0);
+        }
+      );
+      req.on('error', () => resolve(0));
+    });
+
+    expect(statusCode).toBe(403);
+  });
+
+  it('rejects mutating requests with external Origin to prevent CSRF attacks', async () => {
+    const res = await fetch(`http://127.0.0.1:${testPort}/api/review`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: 'https://malicious-website.com',
+      },
+      body: JSON.stringify({ target: { type: 'staged' } }),
+    });
+    expect(res.status).toBe(403);
+    const data = (await res.json()) as { error: string };
+    expect(data.error).toContain('CSRF Protection');
+  });
+
+  it('enforces authentication token verification when configured', async () => {
+    const authPort = 3198;
+    const authServer = new LocalReviewServer({
+      port: authPort,
+      host: '127.0.0.1',
+      repoRoot: tempDir,
+      authToken: 'secret-token-123',
+    });
+    await authServer.start();
+
+    try {
+      // 1. Missing token -> 401
+      const resUnauth = await fetch(`http://127.0.0.1:${authPort}/api/settings`);
+      expect(resUnauth.status).toBe(401);
+
+      // 2. Invalid token -> 401
+      const resBad = await fetch(`http://127.0.0.1:${authPort}/api/settings`, {
+        headers: { Authorization: 'Bearer wrong-token' },
+      });
+      expect(resBad.status).toBe(401);
+
+      // 3. Valid token in Authorization header -> 200
+      const resAuth = await fetch(`http://127.0.0.1:${authPort}/api/settings`, {
+        headers: { Authorization: 'Bearer secret-token-123' },
+      });
+      expect(resAuth.status).toBe(200);
+
+      // 4. Valid token in query param -> 200
+      const resQuery = await fetch(`http://127.0.0.1:${authPort}/api/settings?token=secret-token-123`);
+      expect(resQuery.status).toBe(200);
+
+      // 5. Auth verify endpoint
+      const loginRes = await fetch(`http://127.0.0.1:${authPort}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: 'secret-token-123' }),
+      });
+      expect(loginRes.status).toBe(200);
+      const loginData = (await loginRes.json()) as { success: boolean };
+      expect(loginData.success).toBe(true);
+    } finally {
+      await authServer.stop();
+    }
+  });
+
+  it('POST /api/explain generates context explanation for finding', async () => {
+    const finding = {
+      id: 'SEC-200',
+      category: 'security',
+      severity: 'critical',
+      confidence: 0.95,
+      filePath: 'demo.ts',
+      startLine: 1,
+      endLine: 1,
+      title: 'Insecure Function Export',
+      explanation: 'Function compute exposes internal state',
+      evidence: 'export function compute()',
+    };
+
+    const res = await fetch(`http://127.0.0.1:${testPort}/api/explain`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ finding }),
+    });
+
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { findingId: string; snippet: string; explanation: string };
+    expect(data.findingId).toBe('SEC-200');
+    expect(data.snippet).toContain('export function compute()');
+  });
+
+  it('POST /api/generate-test synthesizes targeted unit test fixture', async () => {
+    const finding = {
+      id: 'BUG-300',
+      category: 'bug',
+      severity: 'major',
+      confidence: 0.9,
+      filePath: 'demo.ts',
+      startLine: 1,
+      endLine: 1,
+      title: 'Off by one error',
+      explanation: 'Array index out of bounds',
+      suggestedTest: `it('tests array bounds', () => { expect(true).toBe(true); });`,
+    };
+
+    const res = await fetch(`http://127.0.0.1:${testPort}/api/generate-test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ finding }),
+    });
+
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { testFilePath: string; testCode: string };
+    expect(data.testFilePath).toBe('demo.test.ts');
+    expect(data.testCode).toContain('tests array bounds');
+  });
+
+  it('GET /api/hotspots returns git commit churn metrics', async () => {
+    const res = await fetch(`http://127.0.0.1:${testPort}/api/hotspots`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { hotspots: any[] };
+    expect(Array.isArray(data.hotspots)).toBe(true);
+  });
+
+  it('GET /api/settings returns platform settings and available providers', async () => {
+    const res = await fetch(`http://127.0.0.1:${testPort}/api/settings`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { availableProviders: any[]; authRequired: boolean };
+    expect(data.availableProviders.some((p) => p.id === 'gemini')).toBe(true);
+    expect(data.availableProviders.some((p) => p.id === 'custom')).toBe(true);
+  });
+
+  it('POST /api/settings persists provider updates to .env and applies to active engine', async () => {
+    const res = await fetch(`http://127.0.0.1:${testPort}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: 'gemini',
+        model: 'gemini-flash-latest',
+        apiKey: 'AQ.TestApiKey12345',
+        endpoint: 'https://generativelanguage.googleapis.com/v1beta',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { success: boolean; activeProvider: string; activeModel: string };
+    expect(data.success).toBe(true);
+    expect(data.activeProvider).toBe('gemini');
+    expect(data.activeModel).toBe('gemini-flash-latest');
+
+    // Verify .env file was created/updated in tempDir
+    const envContent = await fs.readFile(path.join(tempDir, '.env'), 'utf-8');
+    expect(envContent).toContain('CR_PROVIDER=gemini');
+    expect(envContent).toContain('GEMINI_MODEL=gemini-flash-latest');
+    expect(envContent).toContain('GEMINI_API_KEY=AQ.TestApiKey12345');
+
+    // Verify GET /api/settings reflects the updated active provider and model
+    const getRes = await fetch(`http://127.0.0.1:${testPort}/api/settings`);
+    const getData = (await getRes.json()) as { activeProvider: string; activeModel: string; hasApiKey: boolean };
+    expect(getData.activeProvider).toBe('gemini');
+    expect(getData.activeModel).toBe('gemini-flash-latest');
+    expect(getData.hasApiKey).toBe(true);
+  });
 });

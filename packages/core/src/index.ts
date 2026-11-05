@@ -1,6 +1,8 @@
 export * from './git/diffParser.js';
 export * from './git/gitClient.js';
+export * from './git/gitChurnAnalyzer.js';
 export * from './config/configLoader.js';
+export * from './config/envLoader.js';
 export { buildReviewPromptV1, type PromptContext as BasePromptContext } from './prompts/reviewPrompt.js';
 export { buildBugLogicPrompt } from './prompts/bugLogicPrompt.js';
 export { buildSecurityPrompt } from './prompts/securityPrompt.js';

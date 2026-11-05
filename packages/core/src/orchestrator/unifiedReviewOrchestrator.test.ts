@@ -167,4 +167,39 @@ describe('UnifiedReviewOrchestrator end-to-end with Mock Provider', () => {
     expect(secondResult.findings.length).toBe(0);
     expect(secondResult.summary.totalFindings).toBe(0);
   });
+
+  it('routes review categories to specific per-agent providers', async () => {
+    let securityAgentInvoked = false;
+    let performanceAgentInvoked = false;
+
+    const securityProvider = {
+      name: 'security-specialist',
+      async isAvailable() { return true; },
+      async analyzeDiff() {
+        securityAgentInvoked = true;
+        return [];
+      },
+    };
+
+    const performanceProvider = {
+      name: 'perf-specialist',
+      async isAvailable() { return true; },
+      async analyzeDiff() {
+        performanceAgentInvoked = true;
+        return [];
+      },
+    };
+
+    const orchestrator = new UnifiedReviewOrchestrator({
+      cwd: tempDir,
+      agentProviders: {
+        security: securityProvider as any,
+        performance: performanceProvider as any,
+      },
+    });
+
+    await orchestrator.runReview({ type: 'unstaged' });
+    expect(securityAgentInvoked).toBe(true);
+    expect(performanceAgentInvoked).toBe(true);
+  });
 });

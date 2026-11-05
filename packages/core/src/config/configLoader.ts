@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { ReviewConfig, ReviewConfigSchema } from '@cr/shared';
+import { loadEnv } from './envLoader.js';
 
 export interface LoadConfigOptions {
   configPath?: string;
@@ -18,6 +19,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<{
   filePath: string | null;
 }> {
   const cwd = options.cwd ?? process.cwd();
+  loadEnv(cwd);
 
   if (options.configPath) {
     const resolvedPath = path.resolve(cwd, options.configPath);

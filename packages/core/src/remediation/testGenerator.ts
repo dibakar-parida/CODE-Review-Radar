@@ -102,3 +102,8 @@ ${testBody}
     }
   }
 }
+
+export function generateUnitTestForFinding(finding: ReviewFinding, repoRoot?: string): GeneratedTestFixture {
+  const gen = new TestGenerator(repoRoot);
+  return gen.generateTestFixture(finding);
+}
