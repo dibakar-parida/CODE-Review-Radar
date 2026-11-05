@@ -8,7 +8,15 @@ import {
   ReviewCategory,
 } from '@cr/shared';
 import { GitClient } from '../git/gitClient.js';
-import { LLMProvider, OllamaProvider, OpenAIProvider, AnthropicProvider } from '../llm/provider.js';
+import {
+  LLMProvider,
+  OllamaProvider,
+  OpenAIProvider,
+  AnthropicProvider,
+  GeminiProvider,
+  CustomOpenAIProvider,
+  createLLMProvider,
+} from '../llm/provider.js';
 import { HallucinationGuard } from '../guard/hallucinationGuard.js';
 import { loadConfig } from '../config/configLoader.js';
 import { SecretRedactor } from '../security/secretRedactor.js';
@@ -27,6 +35,7 @@ export interface OrchestratorOptions {
   config?: ReviewConfig;
   configPath?: string;
   provider?: LLMProvider;
+  agentProviders?: Partial<Record<ReviewCategory, LLMProvider>>;
   gitClient?: GitClient;
   hallucinationGuard?: HallucinationGuard;
   secretRedactor?: SecretRedactor;
@@ -42,8 +51,10 @@ export interface OrchestratorOptions {
 
 export class UnifiedReviewOrchestrator {
   private readonly cwd: string;
-  private readonly configPromise: Promise<ReviewConfig>;
-  private readonly provider?: LLMProvider;
+  private configPromise: Promise<ReviewConfig>;
+  private currentConfig?: ReviewConfig;
+  private provider?: LLMProvider;
+  private readonly agentProviders?: Partial<Record<ReviewCategory, LLMProvider>>;
   private readonly gitClient: GitClient;
   private readonly guard: HallucinationGuard;
   private readonly redactor: SecretRedactor;
@@ -73,6 +84,7 @@ export class UnifiedReviewOrchestrator {
       options.dbMigrationAnalyzer ?? new DatabaseMigrationAnalyzer();
     this.teamRuleEngine = options.teamRuleEngine ?? new TeamRuleEngine({ repoRoot: this.cwd });
     this.provider = options.provider;
+    this.agentProviders = options.agentProviders;
 
     if (options.config) {
       this.configPromise = Promise.resolve(options.config);
@@ -86,6 +98,32 @@ export class UnifiedReviewOrchestrator {
 
   getReviewMemory(): ReviewMemory {
     return this.reviewMemory;
+  }
+
+  async getConfig(): Promise<ReviewConfig> {
+    if (!this.currentConfig) {
+      this.currentConfig = await this.configPromise;
+    }
+    return this.currentConfig;
+  }
+
+  updateConfig(updates: Partial<ReviewConfig>): void {
+    if (this.currentConfig) {
+      this.currentConfig = {
+        ...this.currentConfig,
+        ...updates,
+      };
+      this.configPromise = Promise.resolve(this.currentConfig);
+    } else {
+      this.configPromise = this.configPromise.then((prev) => {
+        this.currentConfig = { ...prev, ...updates };
+        return this.currentConfig;
+      });
+    }
+  }
+
+  setProvider(provider: LLMProvider): void {
+    this.provider = provider;
   }
 
   async runReview(target: ReviewTarget): Promise<ReviewResult> {
@@ -165,16 +203,17 @@ export class UnifiedReviewOrchestrator {
           : fileDiff;
 
         // Run specialized role-scoped agents across configured categories
-        const agentPromises = config.review.categories.map((category) =>
-          provider.analyzeDiff(diffForLLM, config, category, { conventions: conventionsContext }).catch((err) => {
+        const agentPromises = config.review.categories.map((category) => {
+          const catProvider = this.getProviderForCategory(category, config, provider);
+          return catProvider.analyzeDiff(diffForLLM, config, category, { conventions: conventionsContext }).catch((err) => {
             console.warn(
               `[orchestrator] Agent [${category}] warning for ${fileDiff.newPath || fileDiff.oldPath}: ${
                 (err as Error).message
               }`
             );
             return [] as ReviewFinding[];
-          })
-        );
+          });
+        });
 
         const agentResults = await Promise.all(agentPromises);
         const fileAIFindings = agentResults.flat();
@@ -272,6 +311,22 @@ export class UnifiedReviewOrchestrator {
           timeoutMs: config.cloud.anthropic.timeoutMs,
         });
       }
+      if (config.cloud.provider === 'gemini') {
+        return new GeminiProvider({
+          apiKey: config.cloud.gemini.apiKey,
+          model: config.cloud.gemini.model,
+          endpoint: config.cloud.gemini.endpoint,
+          timeoutMs: config.cloud.gemini.timeoutMs,
+        });
+      }
+      if (config.cloud.provider === 'custom') {
+        return new CustomOpenAIProvider({
+          apiKey: config.cloud.custom.apiKey,
+          model: config.cloud.custom.model,
+          endpoint: config.cloud.custom.endpoint,
+          timeoutMs: config.cloud.custom.timeoutMs,
+        });
+      }
       return new OpenAIProvider({
         apiKey: config.cloud.openai.apiKey,
         model: config.cloud.openai.model,
@@ -317,6 +372,29 @@ export class UnifiedReviewOrchestrator {
     }
 
     return localProvider;
+  }
+
+  private getProviderForCategory(
+    category: ReviewCategory,
+    config: ReviewConfig,
+    defaultProvider: LLMProvider
+  ): LLMProvider {
+    // 1. Programmatic option override
+    if (this.agentProviders && this.agentProviders[category]) {
+      return this.agentProviders[category]!;
+    }
+
+    // 2. Config file routing
+    const agentConfig = config.agents?.[category];
+    if (agentConfig && agentConfig.provider) {
+      return createLLMProvider(agentConfig.provider, {
+        apiKey: agentConfig.apiKey,
+        model: agentConfig.model,
+        endpoint: agentConfig.endpoint,
+      });
+    }
+
+    return this.provider ?? defaultProvider;
   }
 
   private simpleGlobMatch(filePath: string, pattern: string): boolean {

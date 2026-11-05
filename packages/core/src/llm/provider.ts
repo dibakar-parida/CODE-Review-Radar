@@ -394,3 +394,228 @@ export class MockLLMProvider implements LLMProvider {
       }));
   }
 }
+
+/**
+ * Google Gemini Cloud Provider Adapter (Gemini 1.5 Pro / Flash).
+ */
+export class GeminiProvider implements LLMProvider {
+  readonly name = 'gemini';
+  private readonly apiKey: string;
+  private readonly model: string;
+  private readonly endpoint: string;
+  private readonly timeoutMs: number;
+
+  constructor(config?: { apiKey?: string; model?: string; endpoint?: string; timeoutMs?: number }) {
+    this.apiKey = config?.apiKey || process.env['GEMINI_API_KEY'] || '';
+    this.model = config?.model || process.env['GEMINI_MODEL'] || 'gemini-flash-latest';
+    this.endpoint = (config?.endpoint || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/+$/, '');
+    this.timeoutMs = config?.timeoutMs ?? 60000;
+  }
+
+  async isAvailable(): Promise<boolean> {
+    return Boolean(this.apiKey && this.apiKey.trim().length > 0);
+  }
+
+  async analyzeDiff(
+    diff: FileDiff,
+    config: ReviewConfig,
+    category?: ReviewCategory,
+    extraContext?: { conventions?: string }
+  ): Promise<ReviewFinding[]> {
+    if (!this.apiKey) {
+      throw new Error('Google Gemini API key missing. Set GEMINI_API_KEY environment variable or configure in .cr.yaml.');
+    }
+
+    const filePath = diff.newPath || diff.oldPath || 'unknown';
+    const { system, user } = category
+      ? getAgentPromptForCategory(category, {
+          diff,
+          minConfidence: config.review.minConfidence,
+          conventions: extraContext?.conventions,
+        })
+      : buildReviewPromptV1({
+          diff,
+          categories: config.review.categories,
+          minConfidence: config.review.minConfidence,
+        });
+
+    const combinedPrompt = `${system}\n\n${user}`;
+    const payload = {
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: combinedPrompt }],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.1,
+        responseMimeType: 'application/json',
+      },
+    };
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    let responseText = '';
+    try {
+      const url = `${this.endpoint}/models/${this.model}:generateContent?key=${encodeURIComponent(this.apiKey)}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': this.apiKey,
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const errorBody = await res.text().catch(() => '');
+        throw new Error(`Gemini API error [${res.status}]: ${errorBody || res.statusText}`);
+      }
+
+      const data = (await res.json()) as {
+        candidates?: Array<{
+          content?: {
+            parts?: Array<{ text?: string }>;
+          };
+        }>;
+      };
+      responseText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    } catch (err: unknown) {
+      throw new Error(`Failed to query Google Gemini at ${this.endpoint}: ${(err as Error).message}`);
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    return parseFindingsHelper(responseText, filePath, config.review.minConfidence);
+  }
+}
+
+/**
+ * Generic OpenAI-Compatible Cloud/Local Adapter (Groq, Mistral, DeepSeek, OpenRouter, vLLM, LocalAI).
+ */
+export class CustomOpenAIProvider implements LLMProvider {
+  readonly name: string;
+  private readonly apiKey: string;
+  private readonly model: string;
+  private readonly endpoint: string;
+  private readonly timeoutMs: number;
+
+  constructor(config?: {
+    name?: string;
+    apiKey?: string;
+    model?: string;
+    endpoint?: string;
+    timeoutMs?: number;
+  }) {
+    this.name = config?.name || 'custom';
+    this.apiKey = config?.apiKey || process.env['CUSTOM_LLM_API_KEY'] || '';
+    this.model = config?.model || 'deepseek-coder';
+    this.endpoint = (config?.endpoint || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
+    this.timeoutMs = config?.timeoutMs ?? 60000;
+  }
+
+  async isAvailable(): Promise<boolean> {
+    if (this.endpoint.includes('127.0.0.1') || this.endpoint.includes('localhost')) {
+      return true;
+    }
+    return Boolean(this.apiKey && this.apiKey.trim().length > 0);
+  }
+
+  async analyzeDiff(
+    diff: FileDiff,
+    config: ReviewConfig,
+    category?: ReviewCategory,
+    extraContext?: { conventions?: string }
+  ): Promise<ReviewFinding[]> {
+    const filePath = diff.newPath || diff.oldPath || 'unknown';
+    const { system, user } = category
+      ? getAgentPromptForCategory(category, {
+          diff,
+          minConfidence: config.review.minConfidence,
+          conventions: extraContext?.conventions,
+        })
+      : buildReviewPromptV1({
+          diff,
+          categories: config.review.categories,
+          minConfidence: config.review.minConfidence,
+        });
+
+    const payload = {
+      model: this.model,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0.1,
+    };
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (this.apiKey) {
+      headers['Authorization'] = `Bearer ${this.apiKey}`;
+    }
+
+    let responseText = '';
+    try {
+      const res = await fetch(`${this.endpoint}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const errorBody = await res.text().catch(() => '');
+        throw new Error(`${this.name} API error [${res.status}]: ${errorBody || res.statusText}`);
+      }
+
+      const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      responseText = data.choices?.[0]?.message?.content ?? '';
+    } catch (err: unknown) {
+      throw new Error(`Failed to query ${this.name} at ${this.endpoint}: ${(err as Error).message}`);
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    return parseFindingsHelper(responseText, filePath, config.review.minConfidence);
+  }
+}
+
+/**
+ * Universal LLM Provider Factory.
+ */
+export function createLLMProvider(
+  type: 'ollama' | 'openai' | 'anthropic' | 'gemini' | 'custom' | 'mock',
+  options?: {
+    apiKey?: string;
+    model?: string;
+    endpoint?: string;
+    timeoutMs?: number;
+    name?: string;
+    mockFindings?: RawAIFinding[];
+  }
+): LLMProvider {
+  switch (type) {
+    case 'ollama':
+      return new OllamaProvider(options);
+    case 'openai':
+      return new OpenAIProvider(options);
+    case 'anthropic':
+      return new AnthropicProvider(options);
+    case 'gemini':
+      return new GeminiProvider(options);
+    case 'custom':
+      return new CustomOpenAIProvider(options);
+    case 'mock':
+      return new MockLLMProvider(options?.mockFindings ?? []);
+    default:
+      throw new Error(`Unsupported LLM provider type: ${type}`);
+  }
+}

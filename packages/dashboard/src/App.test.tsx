@@ -5,6 +5,10 @@ import { ReviewHero } from './components/ReviewHero.js';
 import { BlockGrid } from './components/BlockGrid.js';
 import { FindingCard } from './components/FindingCard.js';
 import { BlastRadiusGraph } from './components/BlastRadiusGraph.js';
+import { ExplainModal } from './components/ExplainModal.js';
+import { GenerateTestModal } from './components/GenerateTestModal.js';
+import { HotspotsPanel } from './components/HotspotsPanel.js';
+import { SettingsModal } from './components/SettingsModal.js';
 
 describe('@cr/dashboard Vibrant & Block-Based Component Architecture', () => {
   it('instantiates ReviewHero with local mode indicator and display title', () => {
@@ -38,5 +42,67 @@ describe('@cr/dashboard Vibrant & Block-Based Component Architecture', () => {
     const blast = graph.props.findings[0]!.blastRadius!;
     expect(blast.some((b: string) => b.startsWith('caller:'))).toBe(true);
     expect(blast.some((b: string) => b.startsWith('route:'))).toBe(true);
+  });
+
+  it('instantiates ExplainModal with finding context and blast radius', () => {
+    const finding = SAMPLE_FINDINGS[0]!;
+    const modal = (
+      <ExplainModal
+        finding={finding}
+        data={{
+          findingId: finding.id,
+          title: finding.title,
+          explanation: finding.explanation,
+          snippet: finding.evidence,
+          blastRadius: finding.blastRadius,
+        }}
+        isLoading={false}
+        onClose={() => {}}
+      />
+    );
+    expect(modal).toBeDefined();
+    expect(modal.props.finding.id).toBe('SEC-001');
+    expect(modal.props.data?.snippet).toContain('git diff');
+  });
+
+  it('instantiates GenerateTestModal with synthesized Vitest code', () => {
+    const finding = SAMPLE_FINDINGS[0]!;
+    const modal = (
+      <GenerateTestModal
+        finding={finding}
+        data={{
+          testFilePath: 'packages/core/src/orchestrator.test.ts',
+          testCode: "describe('regression', () => { it('works', () => expect(true).toBe(true)); });",
+        }}
+        isLoading={false}
+        onClose={() => {}}
+      />
+    );
+    expect(modal).toBeDefined();
+    expect(modal.props.data?.testFilePath).toContain('orchestrator.test.ts');
+    expect(modal.props.data?.testCode).toContain('regression');
+  });
+
+  it('instantiates HotspotsPanel with commit churn metrics', () => {
+    const hotspots = [
+      {
+        filePath: 'packages/core/src/auth.ts',
+        commitCount: 4,
+        linesAdded: 80,
+        linesDeleted: 20,
+        totalChanges: 100,
+        churnScore: 45.2,
+        isHotspot: true,
+      },
+    ];
+    const panel = <HotspotsPanel hotspots={hotspots} />;
+    expect(panel).toBeDefined();
+    expect(panel.props.hotspots[0]!.filePath).toBe('packages/core/src/auth.ts');
+    expect(panel.props.hotspots[0]!.isHotspot).toBe(true);
+  });
+
+  it('instantiates SettingsModal dialog', () => {
+    const modal = <SettingsModal onClose={() => {}} />;
+    expect(modal).toBeDefined();
   });
 });

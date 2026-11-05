@@ -5,6 +5,7 @@ import { createHookCommand } from './commands/hook.js';
 import { createPrCommand } from './commands/pr.js';
 import { createWebhookCommand } from './commands/webhook.js';
 import { createAskCommand } from './commands/ask.js';
+import { createHotspotsCommand } from './commands/hotspots.js';
 import { RepositoryIndexer } from '@cr/core';
 import { LocalReviewServer } from '@cr/server';
 
@@ -33,6 +34,9 @@ export function createProgram(): Command {
 
   // Phase 9 Active Command: cr ask
   program.addCommand(createAskCommand());
+
+  // Git Hotspots Command: cr hotspots
+  program.addCommand(createHotspotsCommand());
 
   // Phase 3 Active Command: cr index
   program

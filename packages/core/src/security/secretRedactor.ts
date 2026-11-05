@@ -163,4 +163,78 @@ export class SecretRedactor {
       return false;
     }
   }
+
+  /**
+   * Scans text using native Gitleaks CLI if installed.
+   */
+  async scanWithGitleaks(content: string): Promise<Array<{ description: string; secret: string; line?: number }>> {
+    const available = await this.isGitleaksAvailable();
+    if (!available || !content.trim()) return [];
+
+    return new Promise((resolve) => {
+      const child = execFile(
+        'gitleaks',
+        ['detect', '--pipe', '--no-git', '--report-format', 'json'],
+        { windowsHide: true, maxBuffer: 10 * 1024 * 1024 },
+        (_error, stdout) => {
+          // Gitleaks exits with exit code 1 when leaks are detected
+          if (stdout) {
+            try {
+              const parsed = JSON.parse(stdout);
+              if (Array.isArray(parsed)) {
+                return resolve(
+                  parsed.map((item: any) => ({
+                    description: item.Description || item.RuleID || 'Gitleaks Secret',
+                    secret: item.Secret || '',
+                    line: item.StartLine,
+                  }))
+                );
+              }
+            } catch {
+              // json parse failure
+            }
+          }
+          resolve([]);
+        }
+      );
+
+      if (child.stdin) {
+        child.stdin.write(content);
+        child.stdin.end();
+      }
+    });
+  }
+
+  /**
+   * Enhanced file diff redactor combining in-memory regex rules with native Gitleaks binary if available.
+   */
+  async redactFileDiffAsync(diff: FileDiff): Promise<{ redactedDiff: FileDiff; secretsFound: number; detectedTypes: string[] }> {
+    const base = this.redactFileDiff(diff);
+    const gitleaksLeaks = await this.scanWithGitleaks(base.redactedDiff.raw);
+
+    if (gitleaksLeaks.length === 0) {
+      return base;
+    }
+
+    let raw = base.redactedDiff.raw;
+    let extraSecrets = 0;
+    const types = new Set(base.detectedTypes);
+
+    for (const leak of gitleaksLeaks) {
+      if (leak.secret && raw.includes(leak.secret) && !leak.secret.startsWith('[REDACTED:')) {
+        raw = raw.replaceAll(leak.secret, `[REDACTED:GITLEAKS_${leak.description.replace(/[^a-zA-Z0-9_]/g, '_').toUpperCase()}]`);
+        extraSecrets++;
+        types.add(`Gitleaks: ${leak.description}`);
+      }
+    }
+
+    return {
+      redactedDiff: {
+        ...base.redactedDiff,
+        raw,
+      },
+      secretsFound: base.secretsFound + extraSecrets,
+      detectedTypes: Array.from(types),
+    };
+  }
 }

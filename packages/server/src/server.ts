@@ -1,5 +1,8 @@
 import * as http from 'node:http';
-import express, { Request, Response } from 'express';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as crypto from 'node:crypto';
+import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import { WebSocketServer, WebSocket } from 'ws';
 import { ReviewTarget, ReviewTargetSchema, ReviewFinding } from '@cr/shared';
@@ -10,6 +13,11 @@ import {
   WebhookEmulator,
   MultiRepoKnowledgeBase,
   PolicyQueryEngine,
+  GitChurnAnalyzer,
+  generateUnitTestForFinding,
+  createLLMProvider,
+  loadEnv,
+  saveEnv,
 } from '@cr/core';
 import { SwarmReviewWatcher } from './watcher.js';
 
@@ -19,6 +27,8 @@ export interface ServerOptions {
   repoRoot?: string;
   orchestrator?: UnifiedReviewOrchestrator;
   indexer?: RepositoryIndexer;
+  authToken?: string;
+  requireAuth?: boolean;
 }
 
 export class LocalReviewServer {
@@ -27,6 +37,7 @@ export class LocalReviewServer {
   public readonly wss: WebSocketServer;
   public readonly host: string;
   public readonly port: number;
+  public readonly authToken?: string;
 
   private readonly repoRoot: string;
   private readonly orchestrator: UnifiedReviewOrchestrator;
@@ -38,6 +49,10 @@ export class LocalReviewServer {
     this.host = options.host ?? '127.0.0.1';
     this.port = options.port ?? 3100;
     this.repoRoot = options.repoRoot ?? process.cwd();
+    loadEnv(this.repoRoot);
+    this.authToken =
+      options.authToken ??
+      (options.requireAuth ? crypto.randomBytes(24).toString('hex') : process.env['CR_AUTH_TOKEN']);
 
     this.orchestrator =
       options.orchestrator ??
@@ -49,6 +64,65 @@ export class LocalReviewServer {
     this.app.use(cors({ origin: /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/ }));
     this.app.use(express.json());
 
+    // 1. DNS Rebinding Protection Middleware
+    this.app.use((req: Request, res: Response, next: NextFunction) => {
+      const hostHeader = req.headers.host || '';
+      const hostname = hostHeader.split(':')[0]?.toLowerCase() || '';
+      const allowedHosts = ['127.0.0.1', 'localhost', '::1', '[::1]', this.host.toLowerCase()];
+      if (hostname && !allowedHosts.includes(hostname)) {
+        res.status(403).json({ error: 'DNS Rebinding Protection: Forbidden Host header' });
+        return;
+      }
+      next();
+    });
+
+    // 2. CSRF / Origin Validation for State-Mutating Requests
+    this.app.use((req: Request, res: Response, next: NextFunction) => {
+      if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method)) {
+        const origin = req.headers.origin;
+        if (origin) {
+          try {
+            const url = new URL(origin);
+            const originHost = url.hostname.toLowerCase();
+            const allowed = ['127.0.0.1', 'localhost', '::1', '[::1]', this.host.toLowerCase()];
+            if (!allowed.includes(originHost)) {
+              res.status(403).json({ error: 'CSRF Protection: Forbidden Origin header' });
+              return;
+            }
+          } catch {
+            res.status(403).json({ error: 'CSRF Protection: Invalid Origin header' });
+            return;
+          }
+        }
+      }
+      next();
+    });
+
+    // 3. Local Authentication Middleware
+    this.app.use((req: Request, res: Response, next: NextFunction) => {
+      if (req.path === '/api/health' || req.path === '/api/auth/login') {
+        return next();
+      }
+      if (!this.authToken) {
+        return next();
+      }
+
+      const authHeader = req.headers.authorization;
+      const customToken = req.headers['x-cr-token'];
+      const queryToken = req.query['token'];
+
+      const token =
+        (authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : undefined) ??
+        (typeof customToken === 'string' ? customToken.trim() : undefined) ??
+        (typeof queryToken === 'string' ? queryToken.trim() : undefined);
+
+      if (token !== this.authToken) {
+        res.status(401).json({ error: 'Unauthorized: Invalid or missing authentication token' });
+        return;
+      }
+      next();
+    });
+
     this.server = http.createServer(this.app);
     this.wss = new WebSocketServer({ server: this.server, path: '/events/progress' });
 
@@ -57,7 +131,22 @@ export class LocalReviewServer {
   }
 
   private initWebSocket(): void {
-    this.wss.on('connection', (ws: WebSocket) => {
+    this.wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
+      if (this.authToken) {
+        try {
+          const url = new URL(req.url ?? '/', `http://${this.host}:${this.port}`);
+          const queryToken = url.searchParams.get('token');
+          const headerToken = req.headers['x-cr-token'];
+          if (queryToken !== this.authToken && headerToken !== this.authToken) {
+            ws.close(1008, 'Unauthorized');
+            return;
+          }
+        } catch {
+          ws.close(1008, 'Unauthorized');
+          return;
+        }
+      }
+
       ws.send(
         JSON.stringify({
           type: 'connected',
@@ -344,6 +433,210 @@ export class LocalReviewServer {
         const engine = new PolicyQueryEngine({ knowledgeBase: kb });
         const result = await engine.ask(query, { repoId, limit });
         res.json(result);
+      } catch (err: unknown) {
+        res.status(500).json({ error: (err as Error).message });
+      }
+    });
+
+    // 9. Single-User Authentication Verification Endpoint
+    this.app.post('/api/auth/login', (req: Request, res: Response) => {
+      const { token } = req.body as { token?: string };
+      if (!this.authToken) {
+        res.json({ success: true, authRequired: false });
+        return;
+      }
+      if (token === this.authToken) {
+        res.json({ success: true, token: this.authToken });
+      } else {
+        res.status(401).json({ success: false, error: 'Invalid authentication token' });
+      }
+    });
+
+    // 10. Explain Context for Finding
+    this.app.post('/api/explain', async (req: Request, res: Response) => {
+      try {
+        const { finding } = req.body as { finding: ReviewFinding };
+        if (!finding) {
+          res.status(400).json({ error: 'finding object is required' });
+          return;
+        }
+
+        let snippet = finding.evidence || '';
+        try {
+          const fullPath = path.resolve(this.repoRoot, finding.filePath);
+          const content = await fs.readFile(fullPath, 'utf-8');
+          const lines = content.split('\n');
+          const start = Math.max(0, finding.startLine - 4);
+          const end = Math.min(lines.length, finding.endLine + 4);
+          snippet = lines.slice(start, end).join('\n');
+        } catch {
+          // Fallback to evidence if file cannot be read
+        }
+
+        res.json({
+          findingId: finding.id,
+          title: finding.title,
+          explanation: finding.explanation,
+          snippet,
+          blastRadius: finding.blastRadius ?? [],
+          suggestedPatch: finding.suggestedPatch,
+          category: finding.category,
+          severity: finding.severity,
+          impactAnalysis: `Severity [${finding.severity.toUpperCase()}] defect detected in ${finding.filePath} (lines ${finding.startLine}-${finding.endLine}).`,
+        });
+      } catch (err: unknown) {
+        res.status(500).json({ error: (err as Error).message });
+      }
+    });
+
+    // 11. Generate Targeted Unit Test for Finding
+    this.app.post('/api/generate-test', async (req: Request, res: Response) => {
+      try {
+        const { finding } = req.body as { finding: ReviewFinding };
+        if (!finding) {
+          res.status(400).json({ error: 'finding object is required' });
+          return;
+        }
+
+        const testUnit = generateUnitTestForFinding(finding);
+        res.json(testUnit);
+      } catch (err: unknown) {
+        res.status(500).json({ error: (err as Error).message });
+      }
+    });
+
+    // 12. Git Commit Churn & Hotspot Analysis
+    this.app.get('/api/hotspots', async (_req: Request, res: Response) => {
+      try {
+        const analyzer = new GitChurnAnalyzer({ cwd: this.repoRoot });
+        const hotspots = await analyzer.analyzeChurn();
+        res.json({
+          hotspots,
+          timestamp: new Date().toISOString(),
+        });
+      } catch (err: unknown) {
+        res.status(500).json({ error: (err as Error).message });
+      }
+    });
+
+    // 13. System & Provider Settings (Persistent via .env)
+    this.app.get('/api/settings', async (_req: Request, res: Response) => {
+      loadEnv(this.repoRoot);
+      const activeProvider =
+        process.env['CR_PROVIDER'] || (process.env['GEMINI_API_KEY'] ? 'gemini' : 'ollama');
+      const activeModel =
+        activeProvider === 'gemini'
+          ? (process.env['GEMINI_MODEL'] || 'gemini-flash-latest')
+          : activeProvider === 'openai'
+          ? (process.env['OPENAI_MODEL'] || 'gpt-4o')
+          : activeProvider === 'anthropic'
+          ? (process.env['ANTHROPIC_MODEL'] || 'claude-3-5-sonnet-20241022')
+          : activeProvider === 'custom'
+          ? (process.env['CUSTOM_LLM_MODEL'] || 'deepseek-coder')
+          : (process.env['OLLAMA_MODEL'] || 'qwen2.5-coder:7b');
+
+      res.json({
+        host: this.host,
+        port: this.port,
+        repoRoot: this.repoRoot,
+        authRequired: Boolean(this.authToken),
+        activeProvider,
+        activeModel,
+        hasApiKey: Boolean(
+          process.env['GEMINI_API_KEY'] ||
+          process.env['OPENAI_API_KEY'] ||
+          process.env['ANTHROPIC_API_KEY'] ||
+          process.env['CUSTOM_LLM_API_KEY']
+        ),
+        availableProviders: [
+          { id: 'ollama', name: 'Ollama (Local-First)', defaultModel: 'qwen2.5-coder:7b', defaultEndpoint: 'http://127.0.0.1:11434' },
+          { id: 'gemini', name: 'Google Gemini', defaultModel: 'gemini-flash-latest', defaultEndpoint: 'https://generativelanguage.googleapis.com/v1beta' },
+          { id: 'openai', name: 'OpenAI', defaultModel: 'gpt-4o', defaultEndpoint: 'https://api.openai.com/v1' },
+          { id: 'anthropic', name: 'Anthropic Claude', defaultModel: 'claude-3-5-sonnet-20241022', defaultEndpoint: 'https://api.anthropic.com/v1' },
+          { id: 'custom', name: 'Custom OpenAI-Compatible (Groq/DeepSeek/Mistral)', defaultModel: 'deepseek-coder', defaultEndpoint: 'https://api.deepseek.com/v1' },
+        ],
+      });
+    });
+
+    this.app.post('/api/settings', async (req: Request, res: Response) => {
+      try {
+        const { provider, model, endpoint, apiKey, mode } = req.body as {
+          provider: 'ollama' | 'gemini' | 'openai' | 'anthropic' | 'custom';
+          model?: string;
+          endpoint?: string;
+          apiKey?: string;
+          mode?: 'local' | 'cloud' | 'hybrid';
+        };
+
+        if (!provider) {
+          res.status(400).json({ error: 'provider is required' });
+          return;
+        }
+
+        const envUpdates: Record<string, string> = {
+          CR_PROVIDER: provider,
+        };
+
+        const resolvedModel =
+          model?.trim() ||
+          (provider === 'gemini'
+            ? 'gemini-flash-latest'
+            : provider === 'openai'
+            ? 'gpt-4o'
+            : provider === 'anthropic'
+            ? 'claude-3-5-sonnet-20241022'
+            : provider === 'custom'
+            ? 'deepseek-coder'
+            : 'qwen2.5-coder:7b');
+
+        if (provider === 'gemini') {
+          envUpdates['GEMINI_MODEL'] = resolvedModel;
+          if (apiKey && apiKey.trim().length > 0) envUpdates['GEMINI_API_KEY'] = apiKey.trim();
+          if (endpoint) envUpdates['GEMINI_ENDPOINT'] = endpoint.trim();
+        } else if (provider === 'openai') {
+          envUpdates['OPENAI_MODEL'] = resolvedModel;
+          if (apiKey && apiKey.trim().length > 0) envUpdates['OPENAI_API_KEY'] = apiKey.trim();
+          if (endpoint) envUpdates['OPENAI_ENDPOINT'] = endpoint.trim();
+        } else if (provider === 'anthropic') {
+          envUpdates['ANTHROPIC_MODEL'] = resolvedModel;
+          if (apiKey && apiKey.trim().length > 0) envUpdates['ANTHROPIC_API_KEY'] = apiKey.trim();
+          if (endpoint) envUpdates['ANTHROPIC_ENDPOINT'] = endpoint.trim();
+        } else if (provider === 'custom') {
+          envUpdates['CUSTOM_LLM_MODEL'] = resolvedModel;
+          if (apiKey && apiKey.trim().length > 0) envUpdates['CUSTOM_LLM_API_KEY'] = apiKey.trim();
+          if (endpoint) envUpdates['CUSTOM_LLM_ENDPOINT'] = endpoint.trim();
+        } else if (provider === 'ollama') {
+          envUpdates['OLLAMA_MODEL'] = resolvedModel;
+          if (endpoint) envUpdates['OLLAMA_ENDPOINT'] = endpoint.trim();
+        }
+
+        // Persist to .env file in repoRoot
+        saveEnv(this.repoRoot, envUpdates);
+
+        // Dynamically instantiate and register the provider on the live orchestrator
+        const newProvider = createLLMProvider(provider, {
+          apiKey: apiKey || (provider === 'gemini' ? process.env['GEMINI_API_KEY'] : undefined),
+          model: resolvedModel,
+          endpoint,
+        });
+
+        this.orchestrator.setProvider(newProvider);
+        const resolvedMode = mode ?? (provider === 'ollama' ? 'local' : 'cloud');
+        this.orchestrator.updateConfig({ mode: resolvedMode });
+
+        this.broadcast({
+          type: 'settings:updated',
+          stage: 'settings',
+          detail: `Active review provider switched to ${provider} (${resolvedModel})`,
+          payload: { provider, model: resolvedModel, mode: resolvedMode },
+        });
+
+        res.json({
+          success: true,
+          activeProvider: provider,
+          activeModel: resolvedModel,
+          message: 'Settings saved to .env and applied to active review orchestrator.',
+        });
       } catch (err: unknown) {
         res.status(500).json({ error: (err as Error).message });
       }

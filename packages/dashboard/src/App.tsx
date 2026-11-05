@@ -7,7 +7,38 @@ import { FindingCard } from './components/FindingCard.js';
 import { BlastRadiusGraph } from './components/BlastRadiusGraph.js';
 import { StyleTile } from './components/StyleTile.js';
 import { ContrastTable } from './components/ContrastTable.js';
+import { ExplainModal, ExplainData } from './components/ExplainModal.js';
+import { GenerateTestModal, GeneratedTestData } from './components/GenerateTestModal.js';
+import { SettingsModal } from './components/SettingsModal.js';
+import { HotspotsPanel, HotspotMetric } from './components/HotspotsPanel.js';
 
+export const INITIAL_SUMMARY: ReviewSummary = {
+  target: { type: 'staged' },
+  executionMode: 'local',
+  modelName: 'Ollama · qwen2.5-coder:7b',
+  totalFindings: 0,
+  bySeverity: {
+    critical: 0,
+    major: 0,
+    minor: 0,
+    info: 0,
+  },
+  byCategory: {
+    security: 0,
+    bug: 0,
+    performance: 0,
+    architecture: 0,
+    quality: 0,
+    testing: 0,
+  },
+  filesAnalyzed: 0,
+  durationMs: 0,
+  timestamp: new Date().toISOString(),
+};
+
+/**
+ * Fixture data exported for unit testing component isolated states.
+ */
 export const SAMPLE_SUMMARY: ReviewSummary = {
   target: { type: 'staged' },
   executionMode: 'local',
@@ -103,31 +134,96 @@ export const SAMPLE_FINDINGS: ReviewFinding[] = [
 ];
 
 export const App: React.FC = () => {
-  const [summary, setSummary] = useState<ReviewSummary>(SAMPLE_SUMMARY);
-  const [findings, setFindings] = useState<ReviewFinding[]>(SAMPLE_FINDINGS);
+  const [summary, setSummary] = useState<ReviewSummary>(INITIAL_SUMMARY);
+  const [findings, setFindings] = useState<ReviewFinding[]>([]);
+  const [hotspots, setHotspots] = useState<HotspotMetric[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isHotspotsLoading, setIsHotspotsLoading] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<'staged' | 'unstaged'>('staged');
-  const [statusMessage, setStatusMessage] = useState<string>('');
+  const [statusMessage, setStatusMessage] = useState<string>('Ready for review.');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const fetchLiveReview = async () => {
+  // Modals state
+  const [explainFinding, setExplainFinding] = useState<ReviewFinding | null>(null);
+  const [explainData, setExplainData] = useState<ExplainData | null>(null);
+  const [isExplaining, setIsExplaining] = useState<boolean>(false);
+
+  const [testFinding, setTestFinding] = useState<ReviewFinding | null>(null);
+  const [testData, setTestData] = useState<GeneratedTestData | null>(null);
+  const [isGeneratingTest, setIsGeneratingTest] = useState<boolean>(false);
+
+  const [showSettings, setShowSettings] = useState<boolean>(false);
+
+  // Initialize live WebSocket progress stream
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    try {
+      ws = new WebSocket('ws://127.0.0.1:3100/events/progress');
+      ws.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.stage) {
+            setStatusMessage(`[${payload.stage.toUpperCase()}] ${payload.detail || ''}`);
+          }
+        } catch {
+          // ignore
+        }
+      };
+      ws.onerror = () => {
+        // ws quiet fallback
+      };
+    } catch {
+      // ignore
+    }
+
+    // Load initial hotspots and system health
+    fetchHotspots();
+
+    return () => {
+      ws?.close();
+    };
+  }, []);
+
+  const fetchHotspots = async () => {
+    setIsHotspotsLoading(true);
+    try {
+      const res = await fetch('http://127.0.0.1:3100/api/hotspots');
+      if (res.ok) {
+        const data = (await res.json()) as { hotspots?: HotspotMetric[] };
+        if (data.hotspots) {
+          setHotspots(data.hotspots);
+        }
+      }
+    } catch {
+      // server offline
+    } finally {
+      setIsHotspotsLoading(false);
+    }
+  };
+
+  const fetchLiveReview = async (targetType: 'staged' | 'unstaged' = activeTab) => {
     setIsLoading(true);
-    setStatusMessage('Querying local review orchestrator on 127.0.0.1...');
+    setErrorMessage(null);
+    setStatusMessage(`Running ${targetType} review against local orchestrator...`);
     try {
       const res = await fetch('http://127.0.0.1:3100/api/review', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target: { type: activeTab } }),
+        body: JSON.stringify({ target: { type: targetType } }),
       });
       if (res.ok) {
         const data = (await res.json()) as { summary: ReviewSummary; findings: ReviewFinding[] };
         setSummary(data.summary);
         setFindings(data.findings);
-        setStatusMessage('Review updated successfully.');
+        setStatusMessage(`Review complete: ${data.findings.length} finding(s) found.`);
       } else {
-        setStatusMessage('Server offline; displaying local demo findings.');
+        const errText = await res.text();
+        setErrorMessage(`Server review error: ${errText || res.statusText}`);
+        setStatusMessage('Review failed.');
       }
-    } catch {
-      setStatusMessage('Local server at 127.0.0.1:3100 not reachable; using cached review findings.');
+    } catch (err: unknown) {
+      setErrorMessage(`Cannot reach local server on 127.0.0.1:3100: ${(err as Error).message}`);
+      setStatusMessage('Connection failed.');
     } finally {
       setIsLoading(false);
     }
@@ -136,6 +232,7 @@ export const App: React.FC = () => {
   const handleApplyFix = async (f: ReviewFinding) => {
     if (!f.suggestedPatch) return;
     setStatusMessage(`Applying verified fix for ${f.id}...`);
+    setErrorMessage(null);
     try {
       const res = await fetch('http://127.0.0.1:3100/api/fix', {
         method: 'POST',
@@ -146,36 +243,91 @@ export const App: React.FC = () => {
           verify: true,
         }),
       });
+
       if (res.ok) {
         setStatusMessage(`✔ Fix committed and verified for ${f.id}`);
-        // Remove fixed finding
         setFindings((prev) => prev.filter((item) => item.id !== f.id));
       } else {
-        setStatusMessage(`✖ Fix failed verification and was rolled back.`);
+        const errJson = (await res.json().catch(() => ({}))) as { error?: string };
+        setErrorMessage(`Fix verification failed for ${f.id}: ${errJson.error || 'Syntax/Type verification failed'}. Changes rolled back.`);
+        setStatusMessage(`✖ Fix rejected for ${f.id}`);
       }
-    } catch {
-      setStatusMessage(`[Offline Demo] Verified fix applied for ${f.id}`);
-      setFindings((prev) => prev.filter((item) => item.id !== f.id));
+    } catch (err: unknown) {
+      setErrorMessage(`Network error attempting to apply fix: ${(err as Error).message}`);
+      setStatusMessage(`✖ Connection error`);
     }
   };
 
   const handleDismissFinding = async (f: ReviewFinding) => {
     setStatusMessage(`Dismissing finding ${f.id}...`);
     try {
-      await fetch('http://127.0.0.1:3100/api/telemetry/decision', {
+      const res = await fetch('http://127.0.0.1:3100/api/telemetry/decision', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           finding: f,
           decision: 'ignored',
-          reason: 'Dismissed from dashboard',
+          reason: 'Dismissed from dashboard UI',
         }),
       });
-      setStatusMessage(`✔ Finding ${f.id} dismissed and recorded in review memory.`);
-      setFindings((prev) => prev.filter((item) => item.id !== f.id));
+      if (res.ok) {
+        setStatusMessage(`✔ Finding ${f.id} dismissed and suppressed in review memory.`);
+        setFindings((prev) => prev.filter((item) => item.id !== f.id));
+      }
+    } catch (err: unknown) {
+      setErrorMessage(`Failed to record dismissal: ${(err as Error).message}`);
+    }
+  };
+
+  const handleExplain = async (f: ReviewFinding) => {
+    setExplainFinding(f);
+    setIsExplaining(true);
+    setExplainData(null);
+    try {
+      const res = await fetch('http://127.0.0.1:3100/api/explain', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ finding: f }),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as ExplainData;
+        setExplainData(data);
+      }
     } catch {
-      setStatusMessage(`[Offline Demo] Finding ${f.id} dismissed.`);
-      setFindings((prev) => prev.filter((item) => item.id !== f.id));
+      // fallback to finding data
+      setExplainData({
+        findingId: f.id,
+        title: f.title,
+        explanation: f.explanation,
+        snippet: f.evidence,
+        blastRadius: f.blastRadius,
+      });
+    } finally {
+      setIsExplaining(false);
+    }
+  };
+
+  const handleGenerateTest = async (f: ReviewFinding) => {
+    setTestFinding(f);
+    setIsGeneratingTest(true);
+    setTestData(null);
+    try {
+      const res = await fetch('http://127.0.0.1:3100/api/generate-test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ finding: f }),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as GeneratedTestData;
+        setTestData(data);
+      }
+    } catch {
+      setTestData({
+        testFilePath: `${f.filePath}.test.ts`,
+        testCode: f.suggestedTest || `// Vitest test fixture for ${f.id}\nexpect(true).toBe(true);`,
+      });
+    } finally {
+      setIsGeneratingTest(false);
     }
   };
 
@@ -193,57 +345,99 @@ export const App: React.FC = () => {
         <polygon points="50,5 95,50 50,95 5,50" />
         <circle cx="50" cy="50" r="22" stroke="currentColor" strokeDasharray="4 4" />
       </svg>
-      <svg
-        className="shape"
-        style={{ top: '900px', left: '-20px', width: '220px', height: '220px', color: 'var(--vb-pink)' }}
-        viewBox="0 0 100 100"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-      >
-        <rect x="20" y="20" width="60" height="60" stroke="currentColor" />
-        <circle cx="50" cy="50" r="38" />
-      </svg>
 
-      {/* Target Selector Navigation */}
-      <nav style={{ display: 'flex', gap: '1rem', marginBottom: '2.5rem' }}>
-        <button
-          onClick={() => {
-            setActiveTab('staged');
-            fetchLiveReview();
-          }}
-          style={{
-            padding: '0.6rem 1.4rem',
-            borderRadius: '0.75rem',
-            border: activeTab === 'staged' ? '2px solid var(--vb-lime)' : '1px solid #333',
-            background: activeTab === 'staged' ? '#141414' : 'transparent',
-            color: activeTab === 'staged' ? 'var(--vb-lime)' : '#888',
-            fontWeight: 800,
-            cursor: 'pointer',
-          }}
-        >
-          staged (4 files)
-        </button>
-        <button
-          onClick={() => {
-            setActiveTab('unstaged');
-            fetchLiveReview();
-          }}
-          style={{
-            padding: '0.6rem 1.4rem',
-            borderRadius: '0.75rem',
-            border: activeTab === 'unstaged' ? '2px solid var(--vb-lime)' : '1px solid #333',
-            background: activeTab === 'unstaged' ? '#141414' : 'transparent',
-            color: activeTab === 'unstaged' ? 'var(--vb-lime)' : '#888',
-            fontWeight: 800,
-            cursor: 'pointer',
-          }}
-        >
-          unstaged
-        </button>
+      {/* Target Selector Navigation & Action Bar */}
+      <nav style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2.5rem' }}>
+        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+          <button
+            onClick={() => {
+              setActiveTab('staged');
+              fetchLiveReview('staged');
+            }}
+            style={{
+              padding: '0.6rem 1.4rem',
+              borderRadius: '0.75rem',
+              border: activeTab === 'staged' ? '2px solid var(--vb-lime)' : '1px solid #333',
+              background: activeTab === 'staged' ? '#141414' : 'transparent',
+              color: activeTab === 'staged' ? 'var(--vb-lime)' : '#888',
+              fontWeight: 800,
+              cursor: 'pointer',
+            }}
+          >
+            staged changes
+          </button>
+          <button
+            onClick={() => {
+              setActiveTab('unstaged');
+              fetchLiveReview('unstaged');
+            }}
+            style={{
+              padding: '0.6rem 1.4rem',
+              borderRadius: '0.75rem',
+              border: activeTab === 'unstaged' ? '2px solid var(--vb-lime)' : '1px solid #333',
+              background: activeTab === 'unstaged' ? '#141414' : 'transparent',
+              color: activeTab === 'unstaged' ? 'var(--vb-lime)' : '#888',
+              fontWeight: 800,
+              cursor: 'pointer',
+            }}
+          >
+            unstaged changes
+          </button>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <span
+            className="badge"
+            style={{
+              background: '#141414',
+              color: 'var(--vb-cyan)',
+              border: '1px solid rgba(0, 255, 255, 0.4)',
+              padding: '0.4rem 0.8rem',
+              borderRadius: '0.5rem',
+              fontSize: '0.8rem',
+              fontWeight: 700,
+              fontFamily: 'monospace',
+            }}
+          >
+            ● {summary.modelName || 'Local Engine'}
+          </span>
+          <button
+            onClick={() => setShowSettings(true)}
+            style={{
+              padding: '0.6rem 1.25rem',
+              borderRadius: '0.75rem',
+              background: '#141414',
+              border: '1px solid #333',
+              color: '#FFF',
+              fontWeight: 700,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.5rem',
+            }}
+          >
+            <span>⚙ Settings</span>
+          </button>
+        </div>
       </nav>
 
-      {statusMessage && (
+      {/* Live Progress / Error Banner */}
+      {errorMessage ? (
+        <div
+          style={{
+            padding: '0.9rem 1.25rem',
+            borderRadius: '0.75rem',
+            background: 'rgba(255, 20, 147, 0.1)',
+            border: '1px solid var(--vb-rose)',
+            color: 'var(--vb-rose)',
+            fontFamily: 'monospace',
+            fontSize: '0.85rem',
+            marginBottom: '2rem',
+          }}
+        >
+          {errorMessage}
+        </div>
+      ) : statusMessage ? (
         <div
           style={{
             padding: '0.75rem 1.25rem',
@@ -258,26 +452,50 @@ export const App: React.FC = () => {
         >
           {statusMessage}
         </div>
-      )}
+      ) : null}
 
       {/* Frame 2: Review Summary Hero & Block Grid */}
-      <ReviewHero summary={summary} onRefresh={fetchLiveReview} isLoading={isLoading} />
+      <ReviewHero summary={summary} onRefresh={() => fetchLiveReview(activeTab)} isLoading={isLoading} />
       <BlockGrid summary={summary} />
 
+      {/* Repository Git Churn & Hotspots */}
+      <HotspotsPanel hotspots={hotspots} isLoading={isHotspotsLoading} />
+
       {/* Frame 4: Blast Radius & Impact Graph */}
-      <BlastRadiusGraph findings={findings} />
+      {findings.length > 0 && <BlastRadiusGraph findings={findings} />}
 
       {/* Frame 3: Finding Cards & Diff Inspector */}
       <section style={{ marginBottom: '4rem' }}>
-        <h2 style={{ color: '#FFF' }}>Detailed Findings ({findings.length})</h2>
-        {findings.map((f) => (
-          <FindingCard
-            key={f.id}
-            finding={f}
-            onApplyFix={handleApplyFix}
-            onDismiss={handleDismissFinding}
-          />
-        ))}
+        <h2 style={{ color: '#FFF', marginBottom: '1.5rem' }}>Detailed Findings ({findings.length})</h2>
+
+        {findings.length === 0 ? (
+          <div
+            className="block"
+            style={{
+              padding: '3rem',
+              textAlign: 'center',
+              border: '2px dashed #333',
+              borderRadius: '1rem',
+            }}
+          >
+            <div style={{ fontSize: '2rem', marginBottom: '1rem' }}>🛡️</div>
+            <h3 style={{ color: '#FFF', margin: '0 0 0.5rem 0' }}>Clean Workspace</h3>
+            <p style={{ color: '#888', margin: 0 }}>
+              No defects detected. Click &quot;staged changes&quot; or &quot;unstaged changes&quot; to inspect code.
+            </p>
+          </div>
+        ) : (
+          findings.map((f) => (
+            <FindingCard
+              key={f.id}
+              finding={f}
+              onApplyFix={handleApplyFix}
+              onExplain={handleExplain}
+              onGenerateTest={handleGenerateTest}
+              onDismiss={handleDismissFinding}
+            />
+          ))
+        )}
       </section>
 
       {/* Frame 1: Style Tile & Component Sheet */}
@@ -285,6 +503,38 @@ export const App: React.FC = () => {
 
       {/* Accessibility Contrast Matrix */}
       <ContrastTable />
+
+      {/* Interactive Modals */}
+      {explainFinding && (
+        <ExplainModal
+          finding={explainFinding}
+          data={explainData}
+          isLoading={isExplaining}
+          onClose={() => setExplainFinding(null)}
+        />
+      )}
+
+      {testFinding && (
+        <GenerateTestModal
+          finding={testFinding}
+          data={testData}
+          isLoading={isGeneratingTest}
+          onClose={() => setTestFinding(null)}
+        />
+      )}
+
+      {showSettings && (
+        <SettingsModal
+          onClose={() => setShowSettings(false)}
+          onSave={(saved) => {
+            setStatusMessage(`✔ Settings updated: using ${saved.provider} (${saved.model})`);
+            setSummary((prev) => ({
+              ...prev,
+              modelName: `${saved.provider} · ${saved.model}`,
+            }));
+          }}
+        />
+      )}
     </div>
   );
 };

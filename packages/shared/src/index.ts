@@ -138,12 +138,49 @@ export const CloudAnthropicConfigSchema = z.object({
 });
 export type CloudAnthropicConfig = z.infer<typeof CloudAnthropicConfigSchema>;
 
+export const CloudGeminiConfigSchema = z.object({
+  apiKey: z.string().optional(),
+  model: z.string().default('gemini-flash-latest'),
+  endpoint: z.string().default('https://generativelanguage.googleapis.com/v1beta'),
+  timeoutMs: z.number().int().positive().default(60000),
+});
+export type CloudGeminiConfig = z.infer<typeof CloudGeminiConfigSchema>;
+
+export const CloudCustomConfigSchema = z.object({
+  apiKey: z.string().optional(),
+  model: z.string().default('deepseek-coder'),
+  endpoint: z.string().default('https://api.deepseek.com/v1'),
+  timeoutMs: z.number().int().positive().default(60000),
+});
+export type CloudCustomConfig = z.infer<typeof CloudCustomConfigSchema>;
+
 export const CloudLLMConfigSchema = z.object({
-  provider: z.enum(['openai', 'anthropic']).default('openai'),
+  provider: z.enum(['openai', 'anthropic', 'gemini', 'custom']).default('openai'),
   openai: CloudOpenAIConfigSchema.default({}),
   anthropic: CloudAnthropicConfigSchema.default({}),
+  gemini: CloudGeminiConfigSchema.default({}),
+  custom: CloudCustomConfigSchema.default({}),
 });
 export type CloudLLMConfig = z.infer<typeof CloudLLMConfigSchema>;
+
+export const AgentProviderConfigSchema = z.object({
+  provider: z.enum(['ollama', 'openai', 'anthropic', 'gemini', 'custom']).optional(),
+  model: z.string().optional(),
+  endpoint: z.string().optional(),
+  apiKey: z.string().optional(),
+});
+export type AgentProviderConfig = z.infer<typeof AgentProviderConfigSchema>;
+
+export const AgentRoutingConfigSchema = z.object({
+  security: AgentProviderConfigSchema.optional(),
+  logic: AgentProviderConfigSchema.optional(),
+  performance: AgentProviderConfigSchema.optional(),
+  architecture: AgentProviderConfigSchema.optional(),
+  quality: AgentProviderConfigSchema.optional(),
+  testing: AgentProviderConfigSchema.optional(),
+  bug: AgentProviderConfigSchema.optional(),
+});
+export type AgentRoutingConfig = z.infer<typeof AgentRoutingConfigSchema>;
 
 export const StaticAnalysisConfigSchema = z.object({
   enableTsc: z.boolean().default(true),
@@ -241,6 +278,7 @@ export const ReviewConfigSchema = z.object({
   security: SecurityConfigSchema.default({}),
   team: TeamConfigSchema.default({}),
   fallback: FallbackConfigSchema.default({}),
+  agents: AgentRoutingConfigSchema.default({}),
   boundaries: z.array(PackageBoundaryRuleSchema).default([]),
   target: z.object({
     defaultType: ReviewTargetTypeSchema.default('staged'),
